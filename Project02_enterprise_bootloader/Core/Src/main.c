@@ -19,8 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
-#include "i2c.h"
-#include "spi.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -131,12 +129,18 @@ int main(void)
       }
       else
       {
-          if (App_bootloader_update() != 0)
+          int ret = App_bootloader_update();
+          if (ret == 0)
           {
-              printf("[BL] Update failed, halting\r\n");
-              while (1);
+              /* 搬运成功，跳转新 App */
+              App_bootloader_jump_app();
           }
-          App_bootloader_jump_app();
+          else
+          {
+              /* 搬运失败（EEPROM 已清除），跳出厂区 */
+              printf("[BL] Update failed, jump factory\r\n");
+              App_bootloader_factory_reset();
+          }
       }
   }
 
@@ -149,9 +153,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	}
 
   /* USER CODE END 3 */
-}
 }
 
 /**

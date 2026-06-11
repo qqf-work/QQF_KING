@@ -18,6 +18,7 @@
 #include "can_proto.h"
 #include <stdio.h>
 #include <string.h>
+#include "crc32.h"
 
 /**
  * @brief  初始化更新上下文
@@ -85,9 +86,14 @@ static void send_data_frame(AppUpdate_t *ctx)
  */
 static void send_end(AppUpdate_t *ctx)
 {
-    uint8_t end[1] = { CAN_PROTO_CMD_UPDATE_END };
-    CAN_Buf_Send(ctx->can_ctx, CAN_PROTO_ID_HOST, end, 1);
-    printf("[Host] END sent\r\n");
+    uint8_t end[5];
+    end[0] = CAN_PROTO_CMD_UPDATE_END;
+    end[1] = (uint8_t)(ctx->fw_crc);
+    end[2] = (uint8_t)(ctx->fw_crc >> 8);
+    end[3] = (uint8_t)(ctx->fw_crc >> 16);
+    end[4] = (uint8_t)(ctx->fw_crc >> 24);
+    CAN_Buf_Send(ctx->can_ctx, CAN_PROTO_ID_HOST, end, 5);
+    printf("[Host] Send END, crc=0x%08lX\r\n", ctx->fw_crc);
 }
 
 /**
@@ -106,6 +112,9 @@ void AppUpdate_WaitCmd(AppUpdate_t *ctx)
         if (rx_msgs[i].rxHeader.DLC >= 1 &&
             rx_msgs[i].data[0] == CAN_PROTO_CMD_UPDATE_REQ)
         {
+            /* Pre-calculate firmware CRC32 */
+            ctx->fw_crc = CRC32_Calculate(ctx->fw_data, ctx->fw_size);
+            printf("[Host] CRC calc: 0x%08lX\r\n", ctx->fw_crc);
             send_ack(ctx);
             /* 重置发送偏移和序号 */
             ctx->fw_offset = 0;

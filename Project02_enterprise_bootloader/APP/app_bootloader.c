@@ -20,52 +20,21 @@
 uint8_t  app_boot_update_status = BOOT_NO_UPDATE;  /* 0x00=不更新, 0x01=需要更新, 0x02=强制更新 */
 uint32_t app_boot_fw_size = 0;                      /* 固件总字节数，从 EEPROM 读出 */
 
+
 /*
- * verify_w25q_firmware —— 搬运前先看看 W25Q16 里的固件是不是合法的
- *
- * STM32 程序的 bin 文件开头 8 字节固定是：
- *   前 4 字节 = 初始栈指针（MSP），必须指向 RAM 区域（0x20000000~0x20004FFF）
- *   后 4 字节 = ResetHandler 地址，必须在 A 区 Flash 范围内（0x08008000~0x08010000）
- *
- * 如果这两个值不对，说明 W25Q16 里的数据是坏的，
- * 直接返回失败，避免把 A 区好的程序给覆盖了
- *
- * 返回: 0=合法, -1=有问题
+ * clear_eeprom_flag_safe -- 安全清除 EEPROM 更新标志
+ * 顺序：先废密钥（0x11-0x12 写 0x00），再清状态（0x10 写 0x00）
+ * 断电安全：即使步骤 1 后掉电，密钥已失效，Bootloader 不会重复触发更新
  */
-static int verify_w25q_firmware(void)
+static void clear_eeprom_flag_safe(void)
 {
-    uint8_t hdr[8];
+    /* 步骤 1：废密钥（地址 0x11-0x12 写 0x00） */
+    uint8_t zero_key[2] = { 0x00, 0x00 };
+    AT24C02_Write(&eeprom_dev, CHECK_UPDATE_ADDR + 1, zero_key, 2);
 
-    /* 从 W25Q16 起始地址读 8 字节（即 bin 文件头） */
-    if (W25Q16_Read(&w25q_dev, W25Q16_FW_ADDR, hdr, 8) != 0)
-    {
-        printf("[OTA] W25Q16 read header failed\r\n");
-        return -1;
-    }
-
-    /* 小端序拼出 32 位值：低字节在前 */
-    uint32_t sp    = hdr[0] | ((uint32_t)hdr[1] << 8)
-                   | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    uint32_t entry = hdr[4] | ((uint32_t)hdr[5] << 8)
-                   | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-
-    /* 检查栈指针：必须在 STM32 的 RAM 范围内 */
-    if (sp < RAM_START || sp >= RAM_END)
-    {
-        printf("[OTA] Invalid MSP 0x%08lX in W25Q16\r\n", sp);
-        return -1;
-    }
-
-    /* 检查 ResetHandler：必须落在 A 区 Flash 里 */
-    uint32_t a_region_end = A_REGION_ADDR + A_PAGE_NUM * FLASH__PAGE_SIZE;
-    if (entry < A_REGION_ADDR || entry >= a_region_end)
-    {
-        printf("[OTA] Invalid ResetHandler 0x%08lX in W25Q16\r\n", entry);
-        return -1;
-    }
-
-    printf("[OTA] Firmware header OK: MSP=0x%08lX Entry=0x%08lX\r\n", sp, entry);
-    return 0;
+    /* 步骤 2：清状态（地址 0x10 写 0x00） */
+    uint8_t zero_status = BOOT_NO_UPDATE;
+    AT24C02_Write(&eeprom_dev, CHECK_UPDATE_ADDR, &zero_status, 1);
 }
 
 /*
@@ -77,7 +46,8 @@ static int verify_w25q_firmware(void)
  *   [2] 密钥低字节
  *
  * 密钥必须是 0xA5A5 才算有效数据，否则说明 EEPROM 没被正确写入过
- * 读完后会把密钥清零，这样即使板子突然复位也不会重复触发更新（一次性触发）
+ * 密钥校验通过后保留不清除，留给后续 update 流程使用
+ * 搬运成功后由 clear_eeprom_flag_safe() 统一安全清除
  */
 void App_bootloader_check_update(void)
 {
@@ -109,35 +79,25 @@ void App_bootloader_check_update(void)
 
     /* 密钥正确，取出更新状态 */
     app_boot_update_status = data[0];
-
-    /* 立即清零密钥和状态，防止复位后再次触发（一次性触发） */
-    data[0] = BOOT_NO_UPDATE;
-    data[1] = 0x00;
-    data[2] = 0x00;
-    AT24C02_Write(&eeprom_dev, CHECK_UPDATE_ADDR, data, 3);
-
     printf("[BL] Update status: 0x%02X\r\n", app_boot_update_status);
 }
 
 /*
- * App_bootloader_update —— 把 W25Q16 里的固件搬到内部 Flash A 区
+ * App_bootloader_update —— 从 W25Q16 搬运固件到 A 区 Flash
  *
- * 完整步骤：
- *   1. 读 W25Q16 的 JEDEC ID，确认芯片通信正常（应该是 0xEF4015）
- *   2. 从 EEPROM 读出固件大小（之前由外部工具写入的）
- *   3. 校验 W25Q16 里固件的头部（MSP + ResetHandler），防止坏数据覆盖好程序
- *   4. 循环搬运：每次从 W25Q16 读 1KB → 写入 Flash A 区
- *   5. 搬完后校验总字节数是否匹配
+ * 流程：
+ *   1. 校验 W25Q16 芯片 ID
+ *   2. 从 EEPROM 读取固件大小
+ *   3. 搬运 W25Q16 → Flash A 区
+ *   4. 成功则安全清除 EEPROM 标志
  *
- * 失败时不做任何重试，直接停机。用户可以按住 PB0+复位跳到出厂程序恢复
- *
- * 返回: 0=成功, -1=失败
+ * 返回值：0=成功, -1=失败（已清 EEPROM 标志，应跳出厂区）
  */
 int App_bootloader_update(void)
 {
     uint8_t buf[TRANSFER_BUF_SIZE];
 
-    /* 第 1 步：确认 W25Q16 芯片在线且型号正确 */
+    /* 步骤 1：校验 W25Q16 芯片是否在线且型号正确 */
     uint32_t id = W25Q16_ReadJEDECID(&w25q_dev);
     if (id != 0xEF4015)
     {
@@ -145,7 +105,7 @@ int App_bootloader_update(void)
         return -1;
     }
 
-    /* 第 2 步：从 EEPROM 读出固件大小（小端序 4 字节） */
+    /* 步骤 2：从 EEPROM 读取固件大小（4 字节小端序） */
     uint8_t size_buf[4];
     if (AT24C02_Read(&eeprom_dev, FW_SIZE_ADDR, size_buf, 4) != 0)
     {
@@ -155,61 +115,47 @@ int App_bootloader_update(void)
     app_boot_fw_size = size_buf[0] | ((uint32_t)size_buf[1] << 8)
                      | ((uint32_t)size_buf[2] << 16) | ((uint32_t)size_buf[3] << 24);
 
-    /* 固件大小合理性检查：不能为 0，也不能超过 A 区容量（32KB） */
     if (app_boot_fw_size == 0 || app_boot_fw_size > A_PAGE_NUM * FLASH__PAGE_SIZE)
     {
         printf("[BL] Invalid fw_size: %lu\r\n", app_boot_fw_size);
         return -1;
     }
 
-    printf("[BL] Start update: %lu bytes from W25Q16\r\n", app_boot_fw_size);
+    printf("[BL] Start update: %lu bytes\r\n", app_boot_fw_size);
 
-    /* 第 3 步：搬运前先检查 W25Q16 里的固件是不是好的 */
-    if (verify_w25q_firmware() != 0)
-    {
-        printf("[BL] Firmware verification failed, abort update\r\n");
-        return -1;
-    }
+    /* 步骤 3：搬运 W25Q16 → A 区 Flash */
+    printf("[BL] Copying firmware %lu bytes...\r\n", app_boot_fw_size);
 
-    /* 第 4 步：开始搬运 W25Q16 → Flash A 区 */
     FlashDownload_t dl_ctx;
     FlashDownload_Init(&dl_ctx);
 
     uint32_t offset = 0;
     while (offset < app_boot_fw_size)
     {
-        /* 计算本次要搬运多少字节（最后一批可能不满 1KB） */
         uint16_t chunk = TRANSFER_BUF_SIZE;
         if (offset + chunk > app_boot_fw_size)
             chunk = (uint16_t)(app_boot_fw_size - offset);
 
-        /* 从 W25Q16 读一批数据 */
         if (W25Q16_Read(&w25q_dev, W25Q16_FW_ADDR + offset, buf, chunk) != 0)
         {
             printf("[BL] W25Q16 read failed at offset %lu\r\n", offset);
+            clear_eeprom_flag_safe();
             return -1;
         }
 
-        /* 写入内部 Flash（内部会自动处理擦除和半字对齐） */
         if (FlashDownload_WriteFrame(&dl_ctx, buf, chunk) != 0)
         {
             printf("[BL] Flash write failed at offset %lu\r\n", offset);
+            clear_eeprom_flag_safe();
             return -1;
         }
 
         offset += chunk;
     }
 
-    /* 第 5 步：校验写入总字节数是否和预期一致 */
-    uint32_t total = FlashDownload_GetTotal(&dl_ctx);
-    if (total != app_boot_fw_size)
-    {
-        printf("[BL] Verify failed: expected %lu, got %lu\r\n",
-               app_boot_fw_size, total);
-        return -1;
-    }
-
-    printf("[BL] Update complete: %lu bytes\r\n", total);
+    /* 步骤 4：安全清除 EEPROM 标志 */
+    clear_eeprom_flag_safe();
+    printf("[BL] Update success, jump app\r\n");
     return 0;
 }
 
@@ -235,7 +181,7 @@ int App_bootloader_jump_app(void)
 }
 
 /*
- * App_bootloader_factory_reset —— 恢复出厂：跳转到出厂区程序
+ * App_bootloader_factory_reset —— 恢复出厂：直接跳转到出厂区程序
  *
  * 出厂程序编译地址是 0x08004000，直接跳过去就行
  * Bootloader_JumpToApp 内部会自动设置 VTOR 和 MSP

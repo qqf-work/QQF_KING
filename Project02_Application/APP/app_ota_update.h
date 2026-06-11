@@ -34,6 +34,9 @@ typedef enum {
 /* ERROR 后退避等待（ms） */
 #define OTA_ERROR_BACKOFF     3000
 
+/* CRC verify failure max retry count */
+#define OTA_MAX_CRC_RETRY     3
+
 typedef struct {
     OTA_State_t    state;
     OTA_Storage_t  storage;
@@ -41,6 +44,7 @@ typedef struct {
     uint16_t       expect_seq;    /* 期望的下一个数据帧序号 */
     uint32_t       state_tick;    /* 进入当前状态时的 tick */
     uint8_t        error_code;    /* 错误码 */
+    uint8_t        crc_retry_cnt; /* CRC verify failure retry counter */
 } APP_OTA_t;
 
 /* 初始化：绑定 CAN 上下文和存储驱动 */

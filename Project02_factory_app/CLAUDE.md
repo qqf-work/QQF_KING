@@ -34,6 +34,7 @@ Protocol/
 BSP/
   bsp_soft_i2c.c/h       -> 软件 I2C 引脚初始化（暂未使用）
   bsp_soft_spi.c/h       -> 软件 SPI 引脚初始化（暂未使用）
+  bsp_button.c/h         -> PB0 按键驱动（暂未使用，出厂程序不需要按键检测）
 Debug/module_test.c/h    -> 硬件模块测试（暂未使用）
 Core/                    -> CubeMX 生成
 ```

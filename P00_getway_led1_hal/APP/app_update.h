@@ -11,6 +11,7 @@
 #define __APP_UPDATE_H__
 
 #include "can_buf.h"
+#include "crc32.h"
 #include "can_proto.h"
 #include <stdint.h>
 
@@ -34,6 +35,7 @@ typedef struct {
     uint32_t fw_offset;       /* 当前发送偏移量 */
     uint16_t fw_seq;          /* 当前帧序号 */
     uint32_t wait_ready_tick; /* WAIT_READY 状态超时计时 */
+    uint32_t fw_crc;          /* Firmware CRC32 (pre-calculated before sending) */
 } AppUpdate_t;
 
 /**

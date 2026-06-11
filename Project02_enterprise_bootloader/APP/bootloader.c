@@ -12,9 +12,10 @@
  *   1. 关闭全局中断（__disable_irq）—— 防止跳转过程中被中断打断
  *   2. 停止 SysTick（CTRL=0, LOAD=0, VAL=0）—— HAL 的时基，App 会重新初始化
  *   3. HAL_DeInit() —— 反初始化所有 HAL 外设，恢复寄存器默认值
- *   4. 重设 VTOR —— 告诉 CPU 新的向量表位置
- *   5. 重设 MSP —— 切换到 App 的栈
- *   6. 跳转到 ResetHandler —— 开始执行 App
+ *   4. NVIC 全量清理 —— 禁用所有中断通道 + 清除所有挂起标志
+ *   5. 重设 VTOR —— 告诉 CPU 新的向量表位置
+ *   6. 重设 MSP —— 切换到 App 的栈
+ *   7. 跳转到 ResetHandler —— 开始执行 App
  */
 
 #include "bootloader.h"
@@ -32,7 +33,7 @@ typedef void (*pFunction)(void);
  * @return 1 有效, 0 无效
  *
  * STM32F103C8 SRAM 范围：0x20000000 ~ 0x20004FFF（20KB）
- * 合法的 MSP 必须指向这个范围，否则说明向量表数据无效（如 Flash 被擦除）
+ * 合法的 MSP 必须指向这个范围，否则说明向量表数据无效（如 Flash 被擦除后为 0xFFFFFFFF）
  */
 static int validate_msp(uint32_t sp)
 {
@@ -68,7 +69,7 @@ int Bootloader_IsAppValid(void)
  *   1. 从目标地址读取向量表获取 MSP 和 ResetHandler
  *   2. 校验 MSP 在 RAM 范围内
  *   3. 根据 addr 判断目标区域，校验 ResetHandler 在区域内
- *   4. 清理 Bootloader 资源（中断、SysTick、HAL 外设）
+ *   4. 清理 Bootloader 资源（中断、SysTick、HAL 外设、NVIC 残留）
  *   5. 设置 VTOR 指向新向量表
  *   6. 切换 MSP 并跳转
  *
@@ -111,7 +112,8 @@ void Bootloader_JumpToApp(uint32_t addr)
     SysTick->VAL  = 0;  /* 清除当前值 */
     HAL_DeInit();       /* 反初始化所有 HAL 外设 */
 
-    /* 禁用并清除所有 NVIC 中断通道，防止残留状态影响 App */
+    /* NVIC 全量清理：禁用所有中断通道 + 清除所有挂起标志
+     * 防止 Bootloader 残留的中断使能位在 App 开中断后误触发 */
     for (uint32_t i = 0; i < 2; i++) {
         NVIC->ICER[i] = 0xFFFFFFFF;  /* 禁用所有中断通道 */
         NVIC->ICPR[i] = 0xFFFFFFFF;  /* 清除所有挂起标志 */

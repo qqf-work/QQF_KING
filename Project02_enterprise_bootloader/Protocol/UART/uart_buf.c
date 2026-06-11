@@ -2,6 +2,8 @@
 #include "usart.h"
 #include <string.h>
 
+extern DMA_HandleTypeDef hdma_usart1_rx;
+
 /* DMA 接收缓冲区，所有帧数据都落在这块内存中 */
 static uint8_t uart_dma_rx_buf[UART_READ_BUF_SIZE];
 

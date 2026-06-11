@@ -13,6 +13,7 @@ void APP_OTA_Init(APP_OTA_t *ctx, CAN_Buf_t *can_ctx,
     ctx->expect_seq  = 0;
     ctx->state_tick  = 0;
     ctx->error_code  = 0;
+    ctx->crc_retry_cnt = 0;
 
     OTA_Storage_Init(&ctx->storage, w25q, eeprom);
 }
@@ -79,6 +80,7 @@ void APP_OTA_Process(APP_OTA_t *ctx)
                 CAN_Buf_Send(ctx->can_ctx, CAN_PROTO_ID_A, ready, 1);
 
                 ctx->expect_seq = 0;
+                ctx->crc_retry_cnt = 0;
                 ctx->state      = OTA_STATE_RECV_DATA;
                 ctx->state_tick = HAL_GetTick();
                 break;
@@ -134,10 +136,21 @@ void APP_OTA_Process(APP_OTA_t *ctx)
             }
             else if (cmd == CAN_PROTO_CMD_UPDATE_END)
             {
+                /* Parse CRC32 from END frame (bytes 1-4, LE) */
+                uint32_t expected_crc = 0;
+                if (rx_msg[i].rxHeader.DLC >= 5)
+                {
+                    expected_crc = (uint32_t)rx_msg[i].data[1]
+                                 | ((uint32_t)rx_msg[i].data[2] << 8)
+                                 | ((uint32_t)rx_msg[i].data[3] << 16)
+                                 | ((uint32_t)rx_msg[i].data[4] << 24);
+                }
+                OTA_Storage_SetExpectedCRC(&ctx->storage, expected_crc);
+
                 printf("[OTA] END received, total_recv=%lu\r\n",
                        ctx->storage.total_recv);
 
-                /* 刷缓冲 + 写 EEPROM */
+                /* Flush buffer + read-back W25Q16 CRC verify + write EEPROM */
                 int ret = OTA_Storage_Finish(&ctx->storage);
                 if (ret != 0)
                 {
@@ -147,18 +160,16 @@ void APP_OTA_Process(APP_OTA_t *ctx)
                     break;
                 }
 
-                /* 发送完成确认 */
+                /* Send DONE */
                 uint8_t done[1] = { CAN_PROTO_CMD_UPDATE_DONE };
                 CAN_Buf_Send(ctx->can_ctx, CAN_PROTO_ID_A, done, 1);
-                printf("[OTA] UPDATE_DONE sent, EEPROM flags set\r\n");
+                printf("[APP] Update complete, resetting\r\n");
 
-                /* LED2 翻转指示成功 */
+                /* LED2 toggle */
                 HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
 
-                /* 延时确保 CAN 帧发出 + 串口打印完成，然后复位让 Bootloader 搬运固件 */
+                /* Delay for CAN frame + printf, then reset */
                 HAL_Delay(100);
-                printf("[OTA] Resetting for firmware apply...\r\n");
-                HAL_Delay(50);
                 NVIC_SystemReset();
             }
         }
@@ -188,6 +199,24 @@ void APP_OTA_Process(APP_OTA_t *ctx)
             uint8_t err[2] = { CAN_PROTO_CMD_UPDATE_ERR, ctx->error_code };
             CAN_Buf_Send(ctx->can_ctx, CAN_PROTO_ID_A, err, 2);
             printf("[OTA] ERROR: code=0x%02X\r\n", ctx->error_code);
+
+            /* CRC mismatch: accumulate retry counter */
+            if (ctx->error_code == OTA_ERR_CRC_MISMATCH)
+            {
+                ctx->crc_retry_cnt++;
+                printf("[OTA] CRC fail, retry %d/%d\r\n",
+                       ctx->crc_retry_cnt, OTA_MAX_CRC_RETRY);
+
+                if (ctx->crc_retry_cnt >= OTA_MAX_CRC_RETRY)
+                {
+                    printf("[OTA] CRC retry limit reached, abort\r\n");
+                    /* Give up update, continue running current firmware */
+                    ctx->crc_retry_cnt = 0;
+                    ctx->state         = OTA_STATE_IDLE;
+                    ctx->state_tick    = 0;  /* No backoff */
+                    break;
+                }
+            }
 
             OTA_Storage_Reset(&ctx->storage);
             ctx->state      = OTA_STATE_IDLE;

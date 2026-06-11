@@ -6,7 +6,8 @@
  *   [0x10] status      更新状态 (BOOT_xxx)
  *   [0x11] key_high    密钥高字节
  *   [0x12] key_low     密钥低字节
- *   [0x13~0x16] fw_size 固件大小（小端序，4 字节）
+ *   [0x13~0x16] fw_size  固件大小（小端序，4 字节）
+ *   [0x17~0x1A] crc32    固件 CRC32（小端序，4 字节）— Bootloader 不使用，App 端写入
  */
 
 #ifndef __APP_BOOTLOADER_H__
@@ -55,7 +56,7 @@ int App_bootloader_update(void);
 /* 跳转到 A 区 App */
 int App_bootloader_jump_app(void);
 
-/* 恢复出厂设置：出厂区(0x08004000) → A区(0x08008000) 复制后跳转 */
+/* 恢复出厂设置：直接跳转到出厂区(0x08004000) */
 int App_bootloader_factory_reset(void);
 
 #endif
